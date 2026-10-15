@@ -193,15 +193,4 @@ npm start
 ```
 - Aplicación Angular disponible en: `http://localhost:4200`
 
----
-
-## 10. Guía de Defensa Técnica (Para Entrevista Preprofesional)
-
-### ¿Cómo maneja EF Core las transacciones en los pedidos?
-> "En `PedidosService`, creamos una transacción explícita con `BeginTransactionAsync(IsolationLevel.RepeatableRead)`. Esto asegura que la inserción del pedido, los detalles, el descuento de existencias y los movimientos de auditoría ocurran como una única unidad atómica. Si ocurre una excepción (por ejemplo, stock insuficiente o fallo en base de datos), el bloque `catch` ejecuta `transaccion.RollbackAsync()`, garantizando que la base de datos nunca quede en un estado inconsistente."
-
-### ¿Por qué no usar un Generic Repository?
-> "En Entity Framework Core moderno, `DbContext` ya implementa el patrón Unit of Work y cada `DbSet<T>` actúa como un repositorio. Añadir una capa de repositorio genérico adicional oculta capacidades avanzadas de LINQ (`AsNoTracking`, `Include`, proyecciones con `Select`) y agrega complejidad sin beneficio real en proyectos de esta escala."
-
-### ¿Cómo se evitan ventas duplicadas o stock negativo bajo concurrencia?
 > "Configuramos una propiedad `RowVersion` con tipo de dato `rowversion` / `byte[]` en la entidad `Product` mediante Fluent API (`IsRowVersion()`). Cuando dos solicitudes concurrentes intentan actualizar el mismo producto simultáneamente, la primera que guarda actualiza la versión del registro. La segunda solicitud falla con `DbUpdateConcurrencyException`, la transacción se revierte y se notifica al usuario sin permitir que el stock baje de cero."
