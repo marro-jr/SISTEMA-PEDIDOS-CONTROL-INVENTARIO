@@ -116,24 +116,32 @@ La interfaz de usuario interna está organizada por módulos funcionales:
 
 ## 7. Pruebas Automatizadas (xUnit)
 
-El proyecto incluye 16 pruebas automatizadas en `backend/SistemaPedidosInventario.Tests`, ejecutadas contra base de datos relacional en memoria:
+El proyecto incluye 19 casos de prueba automatizados en `backend/SistemaPedidosInventario.Tests`, diferenciados por motor y propósito técnico:
 
-1. **`RegistrarPedido_ConDatosValidos_DescuentaStockYCalculaTotalCorrectamente`**
-2. **`RegistrarPedido_ConProductoInexistente_LanzaNotFoundException`**
-3. **`RegistrarPedido_ConProductoInactivo_LanzaBusinessRuleException`**
-4. **`RegistrarPedido_ConStockInsuficiente_LanzaBusinessRuleException`**
-5. **`RegistrarPedido_ConCantidadInvalidaMenorOCero_LanzaBusinessRuleException`** (Theory con 0 y valores negativos)
-6. **`RegistrarPedido_CalculaSubtotalesYTotalCorrectamenteEnElServidor`**
-7. **`RegistrarPedido_CuandoFallaOperacion_AplicaRollbackYNoModificaStock`**
-8. **`RegistrarPedido_Concurrente_PrevieneStockNegativo`**
-9. **`CrearProducto_ConPrecioNegativoOCero_LanzaBusinessRuleException`**
-10. **`CrearProducto_ConStockNegativo_LanzaBusinessRuleException`**
-11. **`CrearProducto_Valido_GuardaProductoYRegistraMovimientoInicial`**
-12. **`InactivarProducto_Existente_CambiaEstadoAFalso`**
-13. **`ObtenerProductosBajoStock_FiltraProductosPorDebajoDeUmbral`**
-14. **`ObtenerProductosBajoStock_ConUmbralNegativo_LanzaBusinessRuleException`**
+### A. Pruebas Unitarias y de Reglas de Negocio (SQLite In-Memory)
+Diseñadas para ejecución ultrarrápida, portable y sin dependencias externas en pipelines de CI/CD:
+1. **`RegistrarPedido_ConDatosValidos_DescuentaStockYCalculaTotalCorrectamente`**: Verifica creación del pedido, descuento de existencias, cálculo del total y registro de auditoría `VENTA_PEDIDO`.
+2. **`RegistrarPedido_ConProductoInexistente_LanzaNotFoundException`**: Control de referencias inexistentes.
+3. **`RegistrarPedido_ConProductoInactivo_LanzaBusinessRuleException`**: Bloqueo de venta para productos descontinuados.
+4. **`RegistrarPedido_ConStockInsuficiente_LanzaBusinessRuleException`**: Rechazo cuando la demanda supera el stock.
+5. **`RegistrarPedido_ConCantidadInvalidaMenorOCero_LanzaBusinessRuleException`**: Validación para cantidades `<= 0`.
+6. **`RegistrarPedido_CalculaSubtotalesYTotalCorrectamenteEnElServidor`**: Cálculo estricto de subtotales y total ignorando montos del cliente.
+7. **`RegistrarPedido_CuandoFallaDespuesDeIniciarEscrituras_AplicaRollbackYRevierteCambiosFisicos`**: Utiliza un interceptor (`SaveChangesInterceptor`) que inyecta un error inmediatamente después de que la BD ejecutó físicamente los comandos SQL de escritura, comprobando que `RollbackAsync()` revierte los cambios y restaura el stock real.
+8. **`RegistrarPedido_CuandoFallaEnValidacionPrevia_NoModificaStockNiRegistraDatos`**: Comprueba que errores previos de validación no ejecutan escrituras.
+9. **`RegistrarPedido_Concurrente_PrevieneStockNegativo`**: Simula dos solicitudes simultáneas de 4 unidades sobre un stock disponible de 5, exigiendo que **exactamente una tenga éxito, la otra sea rechazada por causa esperada** (regla de negocio / conflicto) y el stock remanente final sea estrictamente 1.
+10. **`CrearProducto_ConPrecioNegativoOCero_LanzaBusinessRuleException`**
+11. **`CrearProducto_ConStockNegativo_LanzaBusinessRuleException`**
+12. **`CrearProducto_Valido_GuardaProductoYRegistraMovimientoInicial`**
+13. **`InactivarProducto_Existente_CambiaEstadoAFalso`**
+14. **`ObtenerProductosBajoStock_FiltraProductosPorDebajoDeUmbral`**
+15. **`ObtenerProductosBajoStock_ConUmbralNegativo_LanzaBusinessRuleException`**
 
-Para ejecutar las pruebas:
+### B. Pruebas de Integración Aisladas contra SQL Server (`RowVersion`)
+Ubicadas de forma aislada en `PedidosSqlServerConcurrencyTests.cs`, utilizan una **base de datos exclusiva de pruebas (`SistemaPedidosInventario_TestDb`)** para no alterar la base de datos de desarrollo:
+1. **`SqlServer_ConcurrenciaOptimistaConRowVersion_LanzaDbUpdateConcurrencyException`**: Carga el mismo producto en dos contextos separados con idéntico `RowVersion`. Al guardar el primero, SQL Server incrementa el timestamp de fila; al intentar guardar el segundo, la cláusula WHERE detecta el cambio de versión y EF Core arroja `DbUpdateConcurrencyException`.
+2. **`SqlServer_PedidosConcurrentes_SoloUnoTieneExitoYOtroEsRechazadoPorConcurrencia`**: Dos pedidos concurrentes de 4 unidades contra 5 disponibles; verifica que la transacción atómica con `RowVersion` previene sobreventas en el motor relacional de producción.
+
+Para ejecutar toda la suite de pruebas:
 ```bash
 dotnet test
 ```

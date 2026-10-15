@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using SistemaPedidosInventario.Api.Data;
 using SistemaPedidosInventario.Api.DTOs;
 using SistemaPedidosInventario.Api.Entities;
@@ -243,7 +244,57 @@ public class PedidosServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task RegistrarPedido_CuandoFallaOperacion_AplicaRollbackYNoModificaStock()
+    public async Task RegistrarPedido_CuandoFallaDespuesDeIniciarEscrituras_AplicaRollbackYRevierteCambiosFisicos()
+    {
+        // Arrange
+        using (var contextoInicial = CrearContexto())
+        {
+            contextoInicial.Products.Add(new Product
+            {
+                Id = 25,
+                Name = "Producto Con Stock Para Rollback",
+                Price = 100m,
+                Stock = 10,
+                Active = true
+            });
+            await contextoInicial.SaveChangesAsync();
+        }
+
+        // Crear opciones de contexto inyectando el interceptor que arroja excepción POST-ESCRITURA
+        // de modo que EF Core ya envió y ejecutó los comandos SQL en la base de datos dentro de la transacción activa
+        var opcionesConInterceptor = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseSqlite(_conexion)
+            .AddInterceptors(new InterceptorFalloPostEscritura())
+            .Options;
+
+        using var contextoPrueba = new ApplicationDbContext(opcionesConInterceptor);
+        var servicio = new PedidosService(contextoPrueba);
+
+        var dto = new CrearPedidoDto
+        {
+            Items = new List<ItemPedidoDto>
+            {
+                new() { ProductId = 25, Quantity = 2 }
+            }
+        };
+
+        // Act & Assert: Debe fallar después de iniciar la escritura física en la base de datos
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => servicio.RegistrarPedidoAsync(dto));
+        Assert.Contains("después de ejecutar escrituras", ex.Message);
+
+        // Verificar que el rollback transaccional revirtió físicamente el descuento de stock ejecutado
+        using var contextoVerificacion = CrearContexto();
+        var prodVerificado = await contextoVerificacion.Products.FindAsync(25);
+        Assert.NotNull(prodVerificado);
+        Assert.Equal(10, prodVerificado.Stock); // El stock se restauró a 10 intacto (no quedó en 8)
+
+        // Verificar que ningún pedido ni movimiento quedó registrado
+        Assert.Empty(await contextoVerificacion.Orders.ToListAsync());
+        Assert.Empty(await contextoVerificacion.StockMovements.ToListAsync());
+    }
+
+    [Fact]
+    public async Task RegistrarPedido_CuandoFallaEnValidacionPrevia_NoModificaStockNiRegistraDatos()
     {
         // Arrange
         using (var contextoInicial = CrearContexto())
@@ -271,7 +322,7 @@ public class PedidosServiceTests : IDisposable
         // Act & Assert
         await Assert.ThrowsAsync<BusinessRuleException>(() => servicio.RegistrarPedidoAsync(dto));
 
-        // Verificar que P1 NO fue descontado debido al rollback transaccional
+        // Verificar que P1 NO fue descontado
         using var contextoVerificacion = CrearContexto();
         var p1 = await contextoVerificacion.Products.FindAsync(20);
         Assert.NotNull(p1);
@@ -285,9 +336,19 @@ public class PedidosServiceTests : IDisposable
     [Fact]
     public async Task RegistrarPedido_Concurrente_PrevieneStockNegativo()
     {
-        // Arrange: Producto con exactamente 5 unidades disponibles
-        using (var contextoInicial = CrearContexto())
+        // Arrange: Base de datos aislada con soporte de conexiones compartidas para concurrencia
+        var nombreBase = $"mem_concurrencia_{Guid.NewGuid():N}";
+        var cadenaConexion = $"Data Source={nombreBase};Mode=Memory;Cache=Shared";
+        using var conexionPrincipal = new SqliteConnection(cadenaConexion);
+        conexionPrincipal.Open();
+
+        var opciones = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseSqlite(cadenaConexion)
+            .Options;
+
+        using (var contextoInicial = new ApplicationDbContext(opciones))
         {
+            contextoInicial.Database.EnsureCreated();
             contextoInicial.Products.Add(new Product
             {
                 Id = 30,
@@ -299,52 +360,86 @@ public class PedidosServiceTests : IDisposable
             await contextoInicial.SaveChangesAsync();
         }
 
-        // Simular dos clientes intentando comprar 4 unidades simultáneamente
+        // Act: Dos solicitudes simultáneas compitiendo por 4 unidades cada una
+        var semaforo = new SemaphoreSlim(0, 2);
+
         var tarea1 = Task.Run(async () =>
         {
+            await semaforo.WaitAsync();
             try
             {
-                using var ctx1 = CrearContexto();
+                using var ctx1 = new ApplicationDbContext(opciones);
                 var s1 = new PedidosService(ctx1);
                 await s1.RegistrarPedidoAsync(new CrearPedidoDto
                 {
                     Items = new List<ItemPedidoDto> { new() { ProductId = 30, Quantity = 4 } }
                 });
-                return true;
+                return (Exito: true, Error: (Exception?)null);
             }
-            catch
+            catch (Exception ex)
             {
-                return false;
+                return (Exito: false, Error: (Exception?)ex);
             }
         });
 
         var tarea2 = Task.Run(async () =>
         {
+            await semaforo.WaitAsync();
             try
             {
-                using var ctx2 = CrearContexto();
+                using var ctx2 = new ApplicationDbContext(opciones);
                 var s2 = new PedidosService(ctx2);
                 await s2.RegistrarPedidoAsync(new CrearPedidoDto
                 {
                     Items = new List<ItemPedidoDto> { new() { ProductId = 30, Quantity = 4 } }
                 });
-                return true;
+                return (Exito: true, Error: (Exception?)null);
             }
-            catch
+            catch (Exception ex)
             {
-                return false;
+                return (Exito: false, Error: (Exception?)ex);
             }
         });
 
+        // Disparo concurrente
+        semaforo.Release(2);
+
         var resultados = await Task.WhenAll(tarea1, tarea2);
 
-        // Assert: No pueden haber tenido éxito ambas compras porque requerían 8 unidades y solo había 5
-        int exitos = resultados.Count(r => r);
-        Assert.True(exitos <= 1, $"Se esperaba como máximo 1 compra exitosa, pero ocurrieron {exitos}.");
+        // Assert: Exigir que exactamente una compra tenga éxito y la otra sea rechazada
+        int exitos = resultados.Count(r => r.Exito);
+        int fracasos = resultados.Count(r => !r.Exito);
 
-        using var contextoVerificacion = CrearContexto();
+        Assert.Equal(1, exitos);
+        Assert.Equal(1, fracasos);
+
+        var resultadoFallido = resultados.First(r => !r.Exito);
+        Assert.NotNull(resultadoFallido.Error);
+
+        var esCausaEsperada = resultadoFallido.Error is BusinessRuleException ||
+                              resultadoFallido.Error is DbUpdateConcurrencyException;
+        Assert.True(esCausaEsperada, $"El error esperado debía ser BusinessRuleException o DbUpdateConcurrencyException, pero fue: {resultadoFallido.Error.GetType().Name}: {resultadoFallido.Error.Message}");
+
+        // Verificar existencias exactas en la base de datos (5 iniciales - 4 compradas = 1)
+        using var contextoVerificacion = new ApplicationDbContext(opciones);
         var prodFinal = await contextoVerificacion.Products.FindAsync(30);
         Assert.NotNull(prodFinal);
-        Assert.True(prodFinal.Stock >= 0, $"El stock final fue negativo ({prodFinal.Stock}) violando la regla de negocio.");
+        Assert.Equal(1, prodFinal.Stock);
+    }
+}
+
+/// <summary>
+/// Interceptor de pruebas que fuerza un fallo exactamente DESPUÉS de que EF Core
+/// ejecutó los comandos SQL en la base de datos dentro de la transacción activa.
+/// Permite comprobar que el Rollback revierte escrituras físicas reales.
+/// </summary>
+public class InterceptorFalloPostEscritura : SaveChangesInterceptor
+{
+    public override ValueTask<int> SavedChangesAsync(
+        SaveChangesCompletedEventData eventData,
+        int result,
+        CancellationToken cancellationToken = default)
+    {
+        throw new InvalidOperationException("Fallo simulado después de ejecutar escrituras en base de datos.");
     }
 }
