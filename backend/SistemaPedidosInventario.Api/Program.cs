@@ -9,14 +9,16 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<ApplicationDbContext>(opciones =>
     opciones.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// Registro de dependencias de servicios
+// Registro de dependencias de la capa de servicios
 builder.Services.AddScoped<IProductosService, ProductosService>();
+builder.Services.AddScoped<IPedidosService, PedidosService>();
+builder.Services.AddScoped<IInventarioService, InventarioService>();
 
 // Manejo global de excepciones estructurado
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
-// Configuración de CORS para cliente Angular
+// Configuración de CORS para el cliente Angular
 builder.Services.AddCors(opciones =>
 {
     opciones.AddPolicy("AngularPolicy", politica =>
