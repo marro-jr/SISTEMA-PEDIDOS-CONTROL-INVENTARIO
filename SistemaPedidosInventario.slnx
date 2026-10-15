@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/backend/">
     <Project Path="backend/SistemaPedidosInventario.Api/SistemaPedidosInventario.Api.csproj" />
+    <Project Path="backend/SistemaPedidosInventario.Tests/SistemaPedidosInventario.Tests.csproj" />
   </Folder>
 </Solution>
